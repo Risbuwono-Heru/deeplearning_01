@@ -4,9 +4,15 @@ Menggunakan Transfer Learning dengan Arsitektur DenseNet121
 """
 
 import os
-import sys
 import requests
+import numpy as np
 import streamlit as st
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+from PIL import Image
+
+os.environ["KERAS_BACKEND"] = "jax"
+import keras
 
 # ─────────────────────────────────────────────────────────────
 # KONFIGURASI
@@ -19,38 +25,6 @@ GDRIVE_ID         = "1n3JdcdVfqYFNlYGVeywipspexElt8QPG"
 LOCAL_MODEL_PATH  = "models/best_densenet121_e4.keras"
 CACHED_MODEL_PATH = "/tmp/best_densenet121_e4.keras"
 LAST_CONV_LAYER   = "conv5_block16_concat"
-
-# ─────────────────────────────────────────────────────────────
-# CEK DEPENDENCIES (lazy, dengan pesan error jelas)
-# ─────────────────────────────────────────────────────────────
-
-def check_dependencies():
-    missing = []
-    for pkg in ["numpy", "PIL", "matplotlib", "keras"]:
-        try:
-            __import__(pkg if pkg != "PIL" else "PIL.Image")
-        except ImportError:
-            missing.append(pkg)
-    return missing
-
-missing = check_dependencies()
-if missing:
-    st.error(f"❌ Package berikut tidak terinstall: {', '.join(missing)}")
-    st.info("Pastikan `requirements.txt` sudah benar dan reboot app.")
-    st.stop()
-
-# Import setelah cek
-import numpy as np
-from PIL import Image
-import matplotlib.pyplot as plt
-import matplotlib.cm as cm
-
-os.environ["KERAS_BACKEND"] = "jax"
-try:
-    import keras
-except Exception as e:
-    st.error(f"❌ Gagal import keras: {e}")
-    st.stop()
 
 # ─────────────────────────────────────────────────────────────
 # DOWNLOAD MODEL
@@ -264,7 +238,7 @@ def main():
                 return
 
             with st.spinner("Menganalisis citra..."):
-                img_tensor             = preprocess_image(pil_image)
+                img_tensor              = preprocess_image(pil_image)
                 label, confidence, prob = predict(model, img_tensor)
 
             show_result(label, confidence, prob)
