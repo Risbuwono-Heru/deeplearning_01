@@ -4,7 +4,7 @@ Menggunakan Transfer Learning dengan Arsitektur DenseNet121
 """
 
 import os
-import gdown
+import requests
 import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
