@@ -1,6 +1,7 @@
 streamlit>=1.35.0
-tensorflow-cpu==2.15.1
-numpy>=1.24.0,<2.0.0
+numpy<2.0.0
 Pillow>=10.0.0
 matplotlib>=3.7.0
 gdown>=5.1.0
+keras>=3.0.0
+jax[cpu]
