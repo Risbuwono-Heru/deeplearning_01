@@ -4,15 +4,9 @@ Menggunakan Transfer Learning dengan Arsitektur DenseNet121
 """
 
 import os
+import sys
 import requests
-import numpy as np
 import streamlit as st
-import matplotlib.pyplot as plt
-import matplotlib.cm as cm
-from PIL import Image
-
-os.environ["KERAS_BACKEND"] = "jax"
-import keras
 
 # ─────────────────────────────────────────────────────────────
 # KONFIGURASI
@@ -27,7 +21,39 @@ CACHED_MODEL_PATH = "/tmp/best_densenet121_e4.keras"
 LAST_CONV_LAYER   = "conv5_block16_concat"
 
 # ─────────────────────────────────────────────────────────────
-# DOWNLOAD MODEL (pakai requests, tanpa gdown)
+# CEK DEPENDENCIES (lazy, dengan pesan error jelas)
+# ─────────────────────────────────────────────────────────────
+
+def check_dependencies():
+    missing = []
+    for pkg in ["numpy", "PIL", "matplotlib", "keras"]:
+        try:
+            __import__(pkg if pkg != "PIL" else "PIL.Image")
+        except ImportError:
+            missing.append(pkg)
+    return missing
+
+missing = check_dependencies()
+if missing:
+    st.error(f"❌ Package berikut tidak terinstall: {', '.join(missing)}")
+    st.info("Pastikan `requirements.txt` sudah benar dan reboot app.")
+    st.stop()
+
+# Import setelah cek
+import numpy as np
+from PIL import Image
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+
+os.environ["KERAS_BACKEND"] = "jax"
+try:
+    import keras
+except Exception as e:
+    st.error(f"❌ Gagal import keras: {e}")
+    st.stop()
+
+# ─────────────────────────────────────────────────────────────
+# DOWNLOAD MODEL
 # ─────────────────────────────────────────────────────────────
 
 def download_from_gdrive(file_id: str, dest_path: str) -> bool:
@@ -117,19 +143,17 @@ def make_gradcam_heatmap(img_tensor, model, prob):
             inputs=model.inputs,
             outputs=[model.get_layer(LAST_CONV_LAYER).output, model.output],
         )
-
         img_jax = jnp.array(img_tensor)
 
         def forward(x):
             conv_out, pred = grad_model(x, training=False)
             p = pred[:, 0]
-            loss = p if prob >= THRESHOLD else (1 - p)
-            return loss.sum(), conv_out
+            return (p if prob >= THRESHOLD else (1 - p)).sum(), conv_out
 
         (_, conv_output), grads = jax.value_and_grad(forward, has_aux=True)(img_jax)
         pooled_grads = jnp.mean(grads[1], axis=(0, 1, 2))
-        heatmap = jnp.sum(conv_output[0] * pooled_grads, axis=-1)
-        heatmap = np.array(jnp.maximum(heatmap, 0))
+        heatmap      = jnp.sum(conv_output[0] * pooled_grads, axis=-1)
+        heatmap      = np.array(jnp.maximum(heatmap, 0))
         if heatmap.max() > 0:
             heatmap /= heatmap.max()
         return heatmap
@@ -140,9 +164,9 @@ def make_gradcam_heatmap(img_tensor, model, prob):
 
 
 def overlay_gradcam(pil_image, heatmap, alpha=0.45):
-    jet_heatmap = Image.fromarray(
-        np.uint8(cm.get_cmap("jet")(np.arange(256))[:, :3][np.uint8(255 * heatmap)] * 255)
-    ).resize(pil_image.size, Image.BILINEAR)
+    colors      = cm.get_cmap("jet")(np.arange(256))[:, :3]
+    jet_heatmap = Image.fromarray(np.uint8(colors[np.uint8(255 * heatmap)] * 255))
+    jet_heatmap = jet_heatmap.resize(pil_image.size, Image.BILINEAR)
     return Image.blend(pil_image.convert("RGB"), jet_heatmap, alpha)
 
 
@@ -154,24 +178,21 @@ def show_result(label, confidence, prob):
     color    = "#d32f2f" if label == POSITIVE_CLASS else "#2e7d32"
     bg_color = "#fff5f5" if label == POSITIVE_CLASS else "#f1f8e9"
     icon     = "🔴" if label == POSITIVE_CLASS else "🟢"
-    st.markdown(
-        f"""
+    st.markdown(f"""
         <div style="background:{bg_color}; border-left:5px solid {color};
                     border-radius:8px; padding:18px 24px; margin-top:10px;">
             <h3 style="margin:0; color:{color};">{icon} {label}</h3>
             <p style="margin:6px 0 4px 0; font-size:0.95rem; color:#555;">
                 Kepercayaan model: <strong>{confidence:.2f}%</strong>
             </p>
-            <div style="background:#e0e0e0; border-radius:8px; height:18px; width:100%; margin-bottom:14px;">
-                <div style="background:{color}; width:{confidence:.1f}%; height:18px; border-radius:8px;"></div>
+            <div style="background:#e0e0e0;border-radius:8px;height:18px;width:100%;margin-bottom:14px;">
+                <div style="background:{color};width:{confidence:.1f}%;height:18px;border-radius:8px;"></div>
             </div>
             <p style="margin:0; font-size:0.82rem; color:#888;">
-                Probabilitas raw scoliosis: {prob:.4f} &nbsp;|&nbsp; Threshold: {THRESHOLD}
+                Prob. scoliosis: {prob:.4f} &nbsp;|&nbsp; Threshold: {THRESHOLD}
             </p>
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    """, unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -183,7 +204,7 @@ def main():
 
     st.markdown("""
         <style>
-            .block-container { padding-top: 1.5rem; }
+            .block-container { padding-top:1.5rem; }
             .stButton > button {
                 width:100%; background-color:#1565c0; color:white;
                 border:none; border-radius:8px; padding:10px 0;
@@ -243,7 +264,7 @@ def main():
                 return
 
             with st.spinner("Menganalisis citra..."):
-                img_tensor = preprocess_image(pil_image)
+                img_tensor             = preprocess_image(pil_image)
                 label, confidence, prob = predict(model, img_tensor)
 
             show_result(label, confidence, prob)
@@ -254,7 +275,7 @@ def main():
                     heatmap = make_gradcam_heatmap(img_tensor, model, prob)
                 if heatmap is not None:
                     overlay = overlay_gradcam(pil_image, heatmap)
-                    g1, g2 = st.columns(2)
+                    g1, g2  = st.columns(2)
                     with g1:
                         fig, ax = plt.subplots(figsize=(4, 4))
                         ax.imshow(heatmap, cmap="jet")
@@ -266,7 +287,7 @@ def main():
                         st.image(overlay, caption="Overlay", use_column_width=True)
                     st.caption("Merah = area fokus model tertinggi.")
 
-            with st.expander("📋 Detail"):
+            with st.expander("📋 Detail Prediksi"):
                 st.markdown(f"""
                 | Parameter | Nilai |
                 |---|---|
