@@ -124,7 +124,7 @@ def make_gradcam_heatmap(img_tensor, model, prob):
 
 
 def overlay_gradcam(pil_image, heatmap, alpha=0.45):
-    colors      = cm.get_cmap("jet")(np.arange(256))[:, :3]
+    colors      = plt.colormaps["jet"](np.arange(256))[:, :3]
     jet_heatmap = Image.fromarray(np.uint8(colors[np.uint8(255 * heatmap)] * 255))
     jet_heatmap = jet_heatmap.resize(pil_image.size, Image.BILINEAR)
     return Image.blend(pil_image.convert("RGB"), jet_heatmap, alpha)
