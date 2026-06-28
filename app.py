@@ -4,15 +4,28 @@ Menggunakan Transfer Learning dengan Arsitektur DenseNet121
 """
 
 import os
-import gdown
-import numpy as np
-import streamlit as st
-import matplotlib.pyplot as plt
-import matplotlib.cm as cm
-from PIL import Image
 
 os.environ["KERAS_BACKEND"] = "jax"
+
+import streamlit as st
+
+st.write("1. Streamlit berhasil di-load")
+
 import keras
+
+st.write("2. Keras berhasil di-load")
+
+import gdown
+st.write("3. gdown OK")
+
+import numpy as np
+st.write("4. numpy OK")
+
+import matplotlib.pyplot as plt
+st.write("5. matplotlib OK")
+
+from PIL import Image
+st.write("6. PIL OK")
 
 # ─────────────────────────────────────────────────────────────
 # KONFIGURASI
