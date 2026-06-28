@@ -1,4 +1,3 @@
-cat > /mnt/user-data/outputs/app.py << 'ENDOFFILE'
 """
 Aplikasi Streamlit: Klasifikasi Skoliosis pada Citra X-Ray Tulang Belakang
 Menggunakan Transfer Learning dengan Arsitektur DenseNet121
@@ -414,4 +413,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-ENDOFFILE
