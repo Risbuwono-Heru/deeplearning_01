@@ -1,28 +1,17 @@
 # ─────────────────────────────────────────────────────────────
-# Requirements — Scoliosis X-Ray Classifier (Optimized)
+# Requirements — Scoliosis X-Ray Classifier
+# Konfigurasi: Google Drive + .keras (sementara, tanpa TFLite)
 #
-# Perubahan dari versi lama:
-#   HAPUS : jax[cpu]  ← penyebab utama reboot lambat (~800MB, slow JIT)
-#   HAPUS : keras>=3.6.0 standalone  ← sudah termasuk dalam tensorflow
-#   TAMBAH: tensorflow-cpu           ← backend pengganti, lebih ringan di cloud
-#   TAMBAH: huggingface-hub          ← pengganti gdown/Google Drive
-#   HAPUS : gdown                    ← tidak diperlukan lagi
+# Perubahan utama dari versi lama:
+#   HAPUS : jax[cpu]        ← penyebab reboot lambat (~800MB)
+#   HAPUS : keras standalone ← sudah include di tensorflow
+#   TAMBAH: tensorflow-cpu   ← backend pengganti, lebih ringan
 # ─────────────────────────────────────────────────────────────
 
-# Core Streamlit
 streamlit>=1.35.0
-
-# Numerik & Gambar
 numpy>=1.26.0
 Pillow>=10.0.0
 matplotlib>=3.7.0
-
-# ML — TensorFlow CPU (include Keras, TFLite interpreter, GradientTape)
-# tensorflow-cpu jauh lebih kecil dari jax[cpu] dan tidak perlu JIT compile
-tensorflow-cpu>=2.15.0,<2.17.0
-
-# Model hosting — Hugging Face Hub (CDN cepat, tidak throttle seperti GDrive)
-huggingface-hub>=0.23.0
-
-# HTTP utility (tetap dipertahankan untuk fallback)
 requests>=2.28.0
+gdown>=5.1.0
+tensorflow-cpu>=2.15.0,<2.17.0
