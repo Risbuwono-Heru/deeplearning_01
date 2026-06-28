@@ -21,54 +21,89 @@ IMG_SIZE          = (224, 224)
 THRESHOLD         = 0.50
 POSITIVE_CLASS    = "Scoliosis"
 NEGATIVE_CLASS    = "Normal"
-GDRIVE_ID         = "1n3JdcdVfqYFNlYGVeywipspexElt8QPG"
+GDRIVE_ID         = "1eSAJ8lDoXsm5E3K7BZlFDJq7-NloTIH6"
 LOCAL_MODEL_PATH  = "models/best_densenet121_e4.keras"
 CACHED_MODEL_PATH = "/tmp/best_densenet121_e4.keras"
 LAST_CONV_LAYER   = "conv5_block16_concat"
 
 # ─────────────────────────────────────────────────────────────
-# DOWNLOAD MODEL
+# DOWNLOAD MODEL DARI GOOGLE DRIVE
 # ─────────────────────────────────────────────────────────────
 
 def download_from_gdrive(file_id: str, dest_path: str) -> bool:
+    """Download file besar dari Google Drive dengan handling virus-scan warning."""
     try:
-        session  = requests.Session()
-        url      = "https://drive.google.com/uc"
-        response = session.get(url, params={"id": file_id, "export": "download"}, stream=True)
+        session = requests.Session()
 
-        token = None
+        # Step 1: Request awal
+        response = session.get(
+            "https://drive.google.com/uc",
+            params={"id": file_id, "export": "download"},
+            stream=True,
+            timeout=30,
+        )
+
+        # Step 2: Cari confirm token (untuk file >100MB)
+        confirm_token = None
         for key, value in response.cookies.items():
             if key.startswith("download_warning"):
-                token = value
-                break
+                confirm_token = value
 
-        if token:
+        # Step 3: Jika ada token, request ulang dengan confirm
+        if confirm_token:
             response = session.get(
-                url,
-                params={"id": file_id, "export": "download", "confirm": token},
+                "https://drive.google.com/uc",
+                params={"id": file_id, "export": "download", "confirm": confirm_token},
                 stream=True,
+                timeout=60,
+            )
+        else:
+            # Coba juga dengan parameter confirm=t langsung
+            response = session.get(
+                "https://drive.google.com/uc",
+                params={"id": file_id, "export": "download", "confirm": "t"},
+                stream=True,
+                timeout=60,
             )
 
+        # Step 4: Simpan file
+        total = 0
         with open(dest_path, "wb") as f:
-            for chunk in response.iter_content(chunk_size=32768):
+            for chunk in response.iter_content(chunk_size=1024 * 1024):  # 1MB chunks
                 if chunk:
                     f.write(chunk)
+                    total += len(chunk)
 
-        return os.path.exists(dest_path) and os.path.getsize(dest_path) > 1000
+        file_size = os.path.getsize(dest_path)
+        return file_size > 10_000  # minimal 10KB
 
     except Exception as e:
-        st.error(f"Gagal mengunduh model: {e}")
+        st.error(f"Error download: {e}")
         return False
 
 
 def resolve_model_path():
     if os.path.exists(LOCAL_MODEL_PATH):
         return LOCAL_MODEL_PATH
-    if os.path.exists(CACHED_MODEL_PATH) and os.path.getsize(CACHED_MODEL_PATH) > 1000:
+
+    if os.path.exists(CACHED_MODEL_PATH):
+        if os.path.getsize(CACHED_MODEL_PATH) > 10_000:
+            return CACHED_MODEL_PATH
+        else:
+            os.remove(CACHED_MODEL_PATH)  # hapus file corrupt
+
+    progress_text = "⏬ Mengunduh model dari Google Drive..."
+    bar = st.progress(0, text=progress_text)
+
+    success = download_from_gdrive(GDRIVE_ID, CACHED_MODEL_PATH)
+
+    bar.progress(100, text="✅ Download selesai!")
+
+    if success:
         return CACHED_MODEL_PATH
-    with st.spinner("⏬ Mengunduh bobot model dari Google Drive (±50MB)..."):
-        success = download_from_gdrive(GDRIVE_ID, CACHED_MODEL_PATH)
-    return CACHED_MODEL_PATH if success else None
+    else:
+        st.error("❌ Gagal mengunduh model. Cek koneksi atau akses Google Drive.")
+        return None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -84,6 +119,9 @@ def load_model():
         return keras.models.load_model(model_path)
     except Exception as e:
         st.error(f"Gagal memuat model: {e}")
+        # Hapus cache jika file corrupt
+        if os.path.exists(CACHED_MODEL_PATH):
+            os.remove(CACHED_MODEL_PATH)
         return None
 
 
@@ -231,7 +269,7 @@ def main():
     with col2:
         st.markdown("### 📊 Hasil Prediksi")
         if uploaded_file and run:
-            with st.spinner("Memuat model..."):
+            with st.spinner("Memuat model DenseNet121..."):
                 model = load_model()
             if model is None:
                 st.error("❌ Model gagal dimuat.")
@@ -272,6 +310,7 @@ def main():
                 | Prediksi | **{label}** |
                 | Kepercayaan | **{confidence:.2f}%** |
                 """)
+
         elif not uploaded_file:
             st.markdown("""
                 <div style="background:#f5f5f5;border-radius:8px;padding:40px;
