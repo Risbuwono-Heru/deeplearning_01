@@ -43,7 +43,7 @@ def resolve_model_path():
     with st.spinner("⏬ Mengunduh model dari Google Drive..."):
         try:
             url = f"https://drive.google.com/uc?id={GDRIVE_ID}"
-            gdown.download(url, CACHED_MODEL_PATH, quiet=False, fuzzy=True)
+            gdown.download(url, CACHED_MODEL_PATH, quiet=False)
         except Exception as e:
             st.error(f"Gagal mengunduh model: {e}")
             return None
