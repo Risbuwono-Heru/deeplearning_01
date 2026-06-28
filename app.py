@@ -4,10 +4,9 @@ Menggunakan Transfer Learning dengan Arsitektur DenseNet121
 
 Optimasi:
 - Backend: TensorFlow-CPU (menggantikan JAX yang berat)
-- Model hosting: Hugging Face Hub (menggantikan Google Drive)
-- Inference: TFLite untuk prediksi cepat (~3x lebih ringan)
-- Grad-CAM: lazy load, hanya dimuat saat diminta user
-- Full model (.keras) dimuat terpisah hanya untuk Grad-CAM
+- Model hosting: Google Drive via gdown (sementara)
+- Inference & Grad-CAM: pakai .keras penuh (TFLite belum tersedia)
+- Grad-CAM: lazy load, hanya dimuat saat user klik tombol
 """
 
 import os
@@ -16,139 +15,103 @@ import streamlit as st
 import matplotlib.pyplot as plt
 from PIL import Image
 
+os.environ["KERAS_BACKEND"] = "tensorflow"
+
 # ─────────────────────────────────────────────────────────────
 # KONFIGURASI
 # ─────────────────────────────────────────────────────────────
-IMG_SIZE           = (224, 224)
-THRESHOLD          = 0.50
-POSITIVE_CLASS     = "Scoliosis"
-NEGATIVE_CLASS     = "Normal"
-LAST_CONV_LAYER    = "conv5_block16_concat"
+IMG_SIZE          = (224, 224)
+THRESHOLD         = 0.50
+POSITIVE_CLASS    = "Scoliosis"
+NEGATIVE_CLASS    = "Normal"
+LAST_CONV_LAYER   = "conv5_block16_concat"
 
-# Hugging Face Hub — ganti dengan repo kamu setelah upload model
-HF_REPO_ID         = "username/scoliosis-densenet121"   # ← GANTI INI
-HF_TFLITE_FILE     = "best_densenet121_e4.tflite"       # untuk prediksi cepat
-HF_KERAS_FILE      = "best_densenet121_e4.keras"        # untuk Grad-CAM
-
-# Path lokal (dev) — jika ada, dipakai duluan
-LOCAL_TFLITE_PATH  = "models/best_densenet121_e4.tflite"
-LOCAL_KERAS_PATH   = "models/best_densenet121_e4.keras"
-
-# Cache path di Streamlit Cloud (/tmp persisten selama container hidup)
-CACHE_TFLITE_PATH  = "/tmp/best_densenet121_e4.tflite"
-CACHE_KERAS_PATH   = "/tmp/best_densenet121_e4.keras"
+GDRIVE_ID         = "1eSAJ8lDoXsm5E3K7BZlFDJq7-NloTIH6"
+LOCAL_MODEL_PATH  = "models/best_densenet121_e4.keras"
+CACHED_MODEL_PATH = "/tmp/best_densenet121_e4.keras"
 
 # ─────────────────────────────────────────────────────────────
-# DOWNLOAD HELPER — HF Hub
+# DOWNLOAD — Google Drive
 # ─────────────────────────────────────────────────────────────
 
-def _download_from_hf(filename: str, cache_path: str) -> str | None:
-    """Download file dari Hugging Face Hub ke cache_path. Return path atau None."""
-    if os.path.exists(cache_path) and os.path.getsize(cache_path) > 10_000:
-        return cache_path
-    try:
-        from huggingface_hub import hf_hub_download
-        path = hf_hub_download(
-            repo_id=HF_REPO_ID,
-            filename=filename,
-            local_dir="/tmp/hf_cache",
-            local_dir_use_symlinks=False,
-        )
-        return path
-    except Exception as e:
-        st.error(f"❌ Gagal mengunduh `{filename}` dari Hugging Face Hub: {e}")
-        return None
+def _resolve_model_path() -> str | None:
+    """Kembalikan path model yang valid, download jika perlu."""
+    if os.path.exists(LOCAL_MODEL_PATH):
+        return LOCAL_MODEL_PATH
+
+    if os.path.exists(CACHED_MODEL_PATH) and os.path.getsize(CACHED_MODEL_PATH) > 10_000:
+        return CACHED_MODEL_PATH
+
+    # Hapus file korup jika ada
+    if os.path.exists(CACHED_MODEL_PATH):
+        os.remove(CACHED_MODEL_PATH)
+
+    with st.spinner("⏬ Mengunduh model dari Google Drive…"):
+        try:
+            import gdown
+            gdown.download(
+                f"https://drive.google.com/uc?id={GDRIVE_ID}",
+                CACHED_MODEL_PATH,
+                quiet=False,
+            )
+        except Exception as e:
+            st.error(f"❌ Gagal mengunduh model: {e}")
+            return None
+
+    if os.path.exists(CACHED_MODEL_PATH) and os.path.getsize(CACHED_MODEL_PATH) > 10_000:
+        return CACHED_MODEL_PATH
+
+    st.error("❌ File model tidak valid setelah diunduh.")
+    return None
 
 # ─────────────────────────────────────────────────────────────
-# LOAD MODEL TFLITE — untuk prediksi cepat
-# ─────────────────────────────────────────────────────────────
-
-@st.cache_resource(show_spinner=False)
-def load_tflite_interpreter():
-    """Load TFLite interpreter. Di-cache agar tidak reload tiap interaksi."""
-    # Coba path lokal dulu (development)
-    if os.path.exists(LOCAL_TFLITE_PATH):
-        model_path = LOCAL_TFLITE_PATH
-    else:
-        with st.spinner("⏬ Mengunduh model (TFLite) dari Hugging Face Hub…"):
-            model_path = _download_from_hf(HF_TFLITE_FILE, CACHE_TFLITE_PATH)
-
-    if model_path is None:
-        return None
-
-    try:
-        import tensorflow as tf
-        interpreter = tf.lite.Interpreter(model_path=str(model_path))
-        interpreter.allocate_tensors()
-        return interpreter
-    except Exception as e:
-        st.error(f"❌ Gagal memuat model TFLite: {e}")
-        return None
-
-# ─────────────────────────────────────────────────────────────
-# LOAD FULL MODEL KERAS — hanya untuk Grad-CAM (lazy)
+# LOAD MODEL — di-cache, tidak reload tiap interaksi
 # ─────────────────────────────────────────────────────────────
 
 @st.cache_resource(show_spinner=False)
-def load_keras_model():
-    """Load model Keras penuh. Hanya dipanggil saat user minta Grad-CAM."""
-    if os.path.exists(LOCAL_KERAS_PATH):
-        model_path = LOCAL_KERAS_PATH
-    else:
-        with st.spinner("⏬ Mengunduh full model untuk Grad-CAM…"):
-            model_path = _download_from_hf(HF_KERAS_FILE, CACHE_KERAS_PATH)
-
+def load_model():
+    """Load model Keras. Di-cache selama container hidup."""
+    model_path = _resolve_model_path()
     if model_path is None:
         return None
-
     try:
-        os.environ["KERAS_BACKEND"] = "tensorflow"
         import keras
         return keras.models.load_model(str(model_path))
     except Exception as e:
-        st.error(f"❌ Gagal memuat model Keras: {e}")
+        st.error(f"❌ Gagal memuat model: {e}")
+        if os.path.exists(CACHED_MODEL_PATH):
+            os.remove(CACHED_MODEL_PATH)
         return None
 
 # ─────────────────────────────────────────────────────────────
-# PRA-PROSES GAMBAR
+# PRA-PROSES & PREDIKSI
 # ─────────────────────────────────────────────────────────────
 
 def preprocess_image(pil_image: Image.Image) -> np.ndarray:
     img = pil_image.convert("RGB").resize(IMG_SIZE)
     return np.expand_dims(np.array(img, dtype=np.float32) / 255.0, axis=0)
 
-# ─────────────────────────────────────────────────────────────
-# PREDIKSI — TFLite interpreter
-# ─────────────────────────────────────────────────────────────
 
-def predict(interpreter, img_tensor: np.ndarray) -> tuple[str, float, float]:
-    inp_detail = interpreter.get_input_details()[0]
-    out_detail = interpreter.get_output_details()[0]
-
-    # Sesuaikan dtype dengan kebutuhan model
-    dtype = inp_detail["dtype"]
-    interpreter.set_tensor(inp_detail["index"], img_tensor.astype(dtype))
-    interpreter.invoke()
-
-    prob = float(interpreter.get_tensor(out_detail["index"])[0][0])
+def predict(model, img_tensor: np.ndarray) -> tuple[str, float, float]:
+    prob = float(model.predict(img_tensor, verbose=0)[0][0])
     if prob >= THRESHOLD:
         return POSITIVE_CLASS, prob * 100, prob
     return NEGATIVE_CLASS, (1 - prob) * 100, prob
 
 # ─────────────────────────────────────────────────────────────
-# GRAD-CAM — TensorFlow GradientTape (tidak butuh JAX)
+# GRAD-CAM — TensorFlow GradientTape (tanpa JAX)
 # ─────────────────────────────────────────────────────────────
 
-def make_gradcam_heatmap(img_tensor: np.ndarray, keras_model, prob: float) -> np.ndarray | None:
+def make_gradcam_heatmap(img_tensor: np.ndarray, model, prob: float) -> np.ndarray | None:
     try:
         import tensorflow as tf
         import keras
 
         grad_model = keras.Model(
-            inputs=keras_model.inputs,
+            inputs=model.inputs,
             outputs=[
-                keras_model.get_layer(LAST_CONV_LAYER).output,
-                keras_model.output,
+                model.get_layer(LAST_CONV_LAYER).output,
+                model.output,
             ],
         )
         img_tf = tf.cast(img_tensor, tf.float32)
@@ -159,10 +122,10 @@ def make_gradcam_heatmap(img_tensor: np.ndarray, keras_model, prob: float) -> np
             p = predictions[:, 0]
             score = p if prob >= THRESHOLD else (1.0 - p)
 
-        grads = tape.gradient(score, conv_output)
+        grads       = tape.gradient(score, conv_output)
         pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-        heatmap = tf.reduce_sum(conv_output[0] * pooled_grads, axis=-1)
-        heatmap = tf.maximum(heatmap, 0).numpy()
+        heatmap     = tf.reduce_sum(conv_output[0] * pooled_grads, axis=-1)
+        heatmap     = tf.maximum(heatmap, 0).numpy()
 
         if heatmap.max() > 0:
             heatmap /= heatmap.max()
@@ -302,8 +265,8 @@ def main():
             <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px;
                         padding:10px 12px; margin-top:10px; font-size:0.75rem; color:#475569;">
                 <p style="margin:0; font-weight:700; color:#1e293b; margin-bottom:4px;">⚙️ Info Model</p>
-                <p style="margin:0;">🏗 DenseNet121 (TFLite)</p>
-                <p style="margin:0;">📄 best_densenet121_e4.tflite</p>
+                <p style="margin:0;">🏗 DenseNet121 (Keras + TF-CPU)</p>
+                <p style="margin:0;">📄 best_densenet121_e4.keras</p>
                 <p style="margin:0;">📐 224×224 px &nbsp;|&nbsp; 🎯 Threshold: 0.50</p>
             </div>
         """, unsafe_allow_html=True)
@@ -327,14 +290,14 @@ def main():
 
         if uploaded_file and run:
             with st.spinner("Memuat model…"):
-                interpreter = load_tflite_interpreter()
+                model = load_model()
 
-            if interpreter is None:
+            if model is None:
                 st.error("❌ Model gagal dimuat.")
             else:
                 with st.spinner("Menganalisis gambar…"):
                     img_tensor              = preprocess_image(pil_image)
-                    label, confidence, prob = predict(interpreter, img_tensor)
+                    label, confidence, prob = predict(model, img_tensor)
 
                 is_sc  = label == POSITIVE_CLASS
                 color  = "#c62828" if is_sc else "#2e7d32"
@@ -374,6 +337,7 @@ def main():
                 st.session_state["img_tensor"] = img_tensor
                 st.session_state["prob"]       = prob
                 st.session_state["pil_image"]  = pil_image
+                st.session_state["model"]      = model
                 st.session_state["ran"]        = True
 
         else:
@@ -387,31 +351,22 @@ def main():
                 </div>
             """, unsafe_allow_html=True)
 
-    # ── Kolom 3: Grad-CAM (lazy — hanya dimuat saat user klik) ──
+    # ── Kolom 3: Grad-CAM (lazy — dimuat hanya saat user klik) ──
     with col_gradcam:
         st.markdown('<p class="panel-title">🔥 Grad-CAM Visualization</p>', unsafe_allow_html=True)
 
         if st.session_state.get("ran") and uploaded_file:
-            # Tombol terpisah — full model (.keras) hanya diunduh saat ini diklik
             if st.button("🔥 Generate Grad-CAM"):
-                with st.spinner("Memuat full model untuk Grad-CAM…"):
-                    keras_model = load_keras_model()
+                with st.spinner("Menghasilkan peta aktivasi…"):
+                    heatmap = make_gradcam_heatmap(
+                        st.session_state["img_tensor"],
+                        st.session_state["model"],
+                        st.session_state["prob"],
+                    )
+                if heatmap is not None:
+                    st.session_state["heatmap"]      = heatmap
+                    st.session_state["gradcam_done"] = True
 
-                if keras_model is None:
-                    st.error("❌ Full model gagal dimuat.")
-                else:
-                    with st.spinner("Menghasilkan peta aktivasi…"):
-                        heatmap = make_gradcam_heatmap(
-                            st.session_state["img_tensor"],
-                            keras_model,
-                            st.session_state["prob"],
-                        )
-
-                    if heatmap is not None:
-                        st.session_state["heatmap"]  = heatmap
-                        st.session_state["gradcam_done"] = True
-
-            # Tampilkan hasil Grad-CAM jika sudah digenerate
             if st.session_state.get("gradcam_done"):
                 heatmap = st.session_state["heatmap"]
                 overlay = overlay_gradcam(st.session_state["pil_image"], heatmap)
