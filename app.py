@@ -2,12 +2,11 @@
 Aplikasi Streamlit: Klasifikasi Skoliosis pada Citra X-Ray Tulang Belakang
 Menggunakan Transfer Learning dengan Arsitektur DenseNet121
 
-UI/UX Redesign:
-- Layout 3 kolom dengan rasio proporsional (1.1 : 1.2 : 1.7)
-- Kolom 1: gambar besar + tombol klasifikasi, info sekunder dalam expander
-- Kolom 2: hasil prediksi mengisi penuh ruang + metric cards
-- Kolom 3: Grad-CAM lebih lebar, heatmap & overlay side-by-side proporsional
-- Tidak ada scroll — semua muat dalam 1 viewport
+UI/UX v5 - Pendekatan bersih:
+- Gambar di-resize Python ke ukuran fixed sebelum ditampilkan (bukan CSS)
+  sehingga tidak pernah overflow apapun level zoom browser
+- Layout stabil di semua zoom level karena tidak bergantung pada px/vh/vw
+- Semua konten muat 1 halaman tanpa scroll
 """
 
 import os
@@ -19,9 +18,6 @@ from PIL import Image
 
 os.environ["KERAS_BACKEND"] = "tensorflow"
 
-# ─────────────────────────────────────────────────────────────
-# KONFIGURASI
-# ─────────────────────────────────────────────────────────────
 IMG_SIZE          = (224, 224)
 THRESHOLD         = 0.50
 POSITIVE_CLASS    = "Scoliosis"
@@ -32,11 +28,13 @@ GDRIVE_ID         = "1eSAJ8lDoXsm5E3K7BZlFDJq7-NloTIH6"
 LOCAL_MODEL_PATH  = "models/best_densenet121_e4.keras"
 CACHED_MODEL_PATH = "/tmp/best_densenet121_e4.keras"
 
-# ─────────────────────────────────────────────────────────────
-# DOWNLOAD — Google Drive
-# ─────────────────────────────────────────────────────────────
+# Tinggi maksimum gambar preview dalam pixel — resize di Python,
+# bukan CSS, sehingga hasil selalu konsisten di semua zoom level
+XRAY_PREVIEW_H  = 280   # px — preview X-ray di kolom 1
+GRADCAM_H       = 300   # px — heatmap & overlay di kolom 3
 
-def _resolve_model_path() -> str | None:
+
+def _resolve_model_path():
     if os.path.exists(LOCAL_MODEL_PATH):
         return LOCAL_MODEL_PATH
     if os.path.exists(CACHED_MODEL_PATH) and os.path.getsize(CACHED_MODEL_PATH) > 10_000:
@@ -48,8 +46,7 @@ def _resolve_model_path() -> str | None:
             import gdown
             gdown.download(
                 f"https://drive.google.com/uc?id={GDRIVE_ID}",
-                CACHED_MODEL_PATH,
-                quiet=False,
+                CACHED_MODEL_PATH, quiet=False,
             )
         except Exception as e:
             st.error(f"❌ Gagal mengunduh model: {e}")
@@ -59,9 +56,6 @@ def _resolve_model_path() -> str | None:
     st.error("❌ File model tidak valid setelah diunduh.")
     return None
 
-# ─────────────────────────────────────────────────────────────
-# LOAD MODEL
-# ─────────────────────────────────────────────────────────────
 
 @st.cache_resource(show_spinner=False)
 def load_model():
@@ -77,26 +71,20 @@ def load_model():
             os.remove(CACHED_MODEL_PATH)
         return None
 
-# ─────────────────────────────────────────────────────────────
-# PRA-PROSES & PREDIKSI
-# ─────────────────────────────────────────────────────────────
 
 def preprocess_image(pil_image: Image.Image) -> np.ndarray:
     img = pil_image.convert("RGB").resize(IMG_SIZE)
     return np.expand_dims(np.array(img, dtype=np.float32) / 255.0, axis=0)
 
 
-def predict(model, img_tensor: np.ndarray) -> tuple[str, float, float]:
+def predict(model, img_tensor: np.ndarray):
     prob = float(model.predict(img_tensor, verbose=0)[0][0])
     if prob >= THRESHOLD:
         return POSITIVE_CLASS, prob * 100, prob
     return NEGATIVE_CLASS, (1 - prob) * 100, prob
 
-# ─────────────────────────────────────────────────────────────
-# GRAD-CAM
-# ─────────────────────────────────────────────────────────────
 
-def make_gradcam_heatmap(img_tensor: np.ndarray, model, prob: float) -> np.ndarray | None:
+def make_gradcam_heatmap(img_tensor: np.ndarray, model, prob: float):
     try:
         import tensorflow as tf
         import keras
@@ -148,9 +136,16 @@ def img_to_bytes(pil_image: Image.Image) -> bytes:
     pil_image.save(buf, format="PNG")
     return buf.getvalue()
 
-# ─────────────────────────────────────────────────────────────
-# MAIN
-# ─────────────────────────────────────────────────────────────
+
+def resize_to_height(pil_image: Image.Image, target_h: int) -> Image.Image:
+    """Resize proporsional ke tinggi target_h. Tidak pernah upscale."""
+    w, h = pil_image.size
+    if h <= target_h:
+        return pil_image
+    ratio   = target_h / h
+    new_w   = max(1, int(w * ratio))
+    return pil_image.resize((new_w, target_h), Image.LANCZOS)
+
 
 def main():
     st.set_page_config(
@@ -161,216 +156,306 @@ def main():
     )
 
     st.markdown("""
-        <style>
-            @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-            html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
 
-            /* Hapus padding default Streamlit, paksa viewport-fit */
-            .block-container {
-                padding: 0 1rem 0 1rem !important;
-                max-width: 100% !important;
-            }
-            [data-testid="stAppViewContainer"] { background: #f0f4f8; }
-            [data-testid="stHeader"] { display: none; }
-            footer, #MainMenu, [data-testid="collapsedControl"] { display: none !important; }
+        /* ── Bersihkan semua padding / chrome Streamlit ── */
+        [data-testid="stHeader"],
+        [data-testid="stToolbar"],
+        [data-testid="stDecoration"],
+        footer, #MainMenu,
+        [data-testid="collapsedControl"] { display: none !important; }
 
-            /* ── Header compact ── */
-            .app-header {
-                background: linear-gradient(135deg, #0d47a1 0%, #1976d2 100%);
-                color: white; padding: 10px 20px;
-                border-radius: 0 0 10px 10px; margin-bottom: 10px;
-                display: flex; align-items: center; gap: 12px;
-                box-shadow: 0 3px 12px rgba(13,71,161,0.22);
-            }
-            .app-header h1 { margin: 0; font-size: 0.98rem; font-weight: 700; line-height: 1.3; }
-            .app-header p  { margin: 0; font-size: 0.7rem; opacity: 0.78; }
+        .block-container {
+            padding: 0 !important;
+            max-width: 100% !important;
+        }
+        [data-testid="stAppViewContainer"] {
+            background: #eef2f7 !important;
+        }
 
-            /* ── Panel card ── */
-            .panel {
-                background: white; border-radius: 12px;
-                padding: 12px 14px; height: 100%;
-                box-shadow: 0 1px 5px rgba(0,0,0,0.07);
-            }
-            .sec-title {
-                font-size: 0.6rem; font-weight: 700; text-transform: uppercase;
-                letter-spacing: 1.3px; color: #94a3b8; margin-bottom: 8px;
-                display: flex; align-items: center; gap: 5px;
-            }
+        /* ── Header ── */
+        .app-header {
+            background: #1565c0;
+            padding: 9px 18px;
+            display: flex; align-items: center; gap: 10px;
+        }
+        .hd-icon {
+            width: 30px; height: 30px; border-radius: 7px;
+            background: rgba(255,255,255,.15);
+            display: flex; align-items: center; justify-content: center;
+            font-size: 15px; flex-shrink: 0;
+        }
+        .hd-title { font-size: 13px; font-weight: 700; color: #fff; margin: 0; }
+        .hd-sub   { font-size: 10px; color: rgba(255,255,255,.65); margin: 1px 0 0; }
+        .hd-badge {
+            margin-left: auto;
+            background: rgba(255,255,255,.15);
+            border: 1px solid rgba(255,255,255,.2);
+            border-radius: 20px; padding: 2px 10px;
+            font-size: 10px; color: rgba(255,255,255,.8);
+        }
 
-            /* ── Upload area ── */
-            [data-testid="stFileUploader"] > div {
-                border: 2px dashed #90caf9 !important;
-                border-radius: 10px !important;
-                background: #f0f7ff !important;
-                padding: 4px !important;
-            }
-            [data-testid="stFileUploader"] label { display: none !important; }
+        /* ── Panel header label ── */
+        .panel-hd {
+            display: flex; align-items: center; gap: 7px;
+            padding: 7px 11px 6px;
+            border-bottom: 0.5px solid #eef2f7;
+            margin-bottom: 4px;
+        }
+        .panel-hd-icon {
+            width: 20px; height: 20px; border-radius: 5px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 11px;
+        }
+        .panel-hd-label {
+            font-size: 9px; font-weight: 700;
+            text-transform: uppercase; letter-spacing: 1.2px; color: #94a3b8;
+        }
 
-            /* ── Gambar X-ray — tinggi tetap, proporsional ── */
-            .xray-wrap img {
-                width: 100% !important;
-                max-height: 340px !important;
-                object-fit: contain !important;
-                border-radius: 8px;
-                background: #0d1117;
-            }
+        /* ── File uploader compact ── */
+        [data-testid="stFileUploader"] { margin-bottom: 0 !important; }
+        [data-testid="stFileUploader"] > div {
+            border: 1.5px dashed #90caf9 !important;
+            border-radius: 8px !important;
+            background: #f0f7ff !important;
+            padding: 4px 8px !important;
+        }
+        [data-testid="stFileUploader"] label  { display: none !important; }
+        [data-testid="stFileUploader"] small  { font-size: 9px !important; }
 
-            /* ── Gambar Grad-CAM ── */
-            .gradcam-img img {
-                width: 100% !important;
-                max-height: 280px !important;
-                object-fit: contain !important;
-                border-radius: 8px;
-            }
+        /* ── X-ray preview: background hitam, gambar di tengah ── */
+        .xray-frame {
+            background: #0d1117;
+            border-radius: 8px;
+            display: flex; align-items: center; justify-content: center;
+            overflow: hidden;
+            margin-bottom: 4px;
+        }
+        /* st.image tidak punya margin */
+        .xray-frame [data-testid="stImage"] { margin: 0 !important; }
 
-            /* ── Chip ── */
-            .chip {
-                display: inline-block; background: #e8f0fe; color: #1a56db;
-                padding: 1px 7px; border-radius: 10px;
-                font-size: 0.68rem; font-weight: 600; margin: 1px 2px 0 0;
-            }
+        /* ── Chip metadata ── */
+        .chip {
+            display: inline-block;
+            background: #eff6ff; color: #1d4ed8;
+            border-radius: 20px; padding: 1px 7px;
+            font-size: 9px; font-weight: 600; margin-right: 3px;
+        }
 
-            /* ── Tombol Klasifikasi ── */
-            div[data-testid="stButton"] > button {
-                width: 100%; font-weight: 700; font-size: 0.88rem;
-                padding: 8px 0; border-radius: 8px; border: none;
-                background: linear-gradient(135deg,#1565c0,#1976d2);
-                color: white; margin-top: 6px;
-                box-shadow: 0 2px 8px rgba(21,101,192,0.28);
-                transition: all .18s;
-            }
-            div[data-testid="stButton"] > button:hover {
-                background: linear-gradient(135deg,#0d47a1,#1565c0);
-                transform: translateY(-1px);
-            }
+        /* ── Tombol Streamlit — override jadi biru padat ── */
+        div[data-testid="stButton"] > button {
+            width: 100%; font-weight: 700; font-size: 11px;
+            padding: 5px 0; border-radius: 7px; border: none;
+            background: #1565c0; color: white;
+            cursor: pointer; transition: background .15s;
+            margin-top: 4px !important;
+        }
+        div[data-testid="stButton"] > button:hover { background: #0d47a1; }
+        /* Tombol reset — abu ── */
+        div[data-testid="stButton"]:last-child > button {
+            background: #f1f5f9; color: #64748b;
+            border: 0.5px solid #e2e8f0;
+        }
 
-            /* ── Metric cards (3 kotak prob) ── */
-            .metric-row {
-                display: flex; gap: 8px; margin-top: 10px;
-            }
-            .metric-card {
-                flex: 1; background: #f8fafc; border: 1px solid #e2e8f0;
-                border-radius: 10px; padding: 10px 10px 8px;
-                text-align: center;
-            }
-            .metric-card .mc-label {
-                font-size: 0.6rem; font-weight: 700; text-transform: uppercase;
-                letter-spacing: .9px; color: #94a3b8; margin-bottom: 4px;
-            }
-            .metric-card .mc-value {
-                font-size: 1.15rem; font-weight: 700; color: #1e293b;
-            }
-            .metric-card .mc-sub {
-                font-size: 0.6rem; color: #94a3b8; margin-top: 1px;
-            }
+        /* ── Model info ── */
+        .model-info {
+            background: #f8fafc; border: 0.5px solid #e2e8f0;
+            border-radius: 7px; padding: 7px 9px; margin-top: 6px;
+        }
+        .model-info-ttl {
+            font-size: 8px; font-weight: 700;
+            text-transform: uppercase; letter-spacing: 1px;
+            color: #94a3b8; margin-bottom: 4px;
+        }
+        .model-info-row { font-size: 9.5px; color: #64748b; margin-bottom: 2px; }
+        .model-lbl-row  { display: flex; gap: 5px; margin-top: 5px; }
+        .model-lbl {
+            flex: 1; text-align: center; padding: 2px 6px;
+            border-radius: 4px; font-size: 9.5px; font-weight: 600;
+        }
 
-            /* ── Legenda Grad-CAM ── */
-            .legend-row {
-                display: flex; gap: 14px; align-items: center;
-                font-size: 0.7rem; color: #64748b; margin-top: 8px;
-            }
-            .legend-dot {
-                width: 9px; height: 9px; border-radius: 50%;
-                display: inline-block; margin-right: 4px;
-            }
+        /* ── Diagnosis card ── */
+        .dx-card { border-radius: 9px; padding: 9px 11px; margin-bottom: 5px; }
+        .dx-lbl {
+            font-size: 8px; font-weight: 700;
+            text-transform: uppercase; letter-spacing: 1px;
+            color: #94a3b8; margin-bottom: 4px;
+        }
+        .dx-row {
+            display: flex; align-items: center;
+            justify-content: space-between; margin-bottom: 6px;
+        }
+        .dx-name { font-size: 17px; font-weight: 700; display: flex; align-items: center; gap: 5px; }
+        .dx-pct  { border-radius: 20px; padding: 3px 12px; font-size: 13px; font-weight: 700; color: white; }
+        .conf-lbl   { font-size: 9px; color: #64748b; font-weight: 600; margin-bottom: 3px; }
+        .conf-track { background: rgba(0,0,0,.08); border-radius: 5px; height: 5px; }
+        .conf-fill  { height: 5px; border-radius: 5px; }
 
-            /* ── Expander info model ── */
-            [data-testid="stExpander"] {
-                border: 1px solid #e2e8f0 !important;
-                border-radius: 8px !important;
-                margin-top: 8px !important;
-            }
-            [data-testid="stExpander"] summary {
-                font-size: 0.72rem !important; color: #475569 !important; padding: 6px 10px !important;
-            }
-        </style>
+        /* ── Metric cards ── */
+        .metric-row { display: flex; gap: 5px; margin-bottom: 5px; }
+        .metric-card {
+            flex: 1; background: #f8fafc;
+            border: 0.5px solid #e2e8f0; border-radius: 7px;
+            padding: 6px 5px; text-align: center;
+        }
+        .mc-l { font-size: 7.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .7px; color: #94a3b8; }
+        .mc-v { font-size: 13px; font-weight: 700; margin: 2px 0 1px; }
+        .mc-s { font-size: 7.5px; color: #94a3b8; }
+
+        /* ── Interpretasi ── */
+        .interp-box {
+            background: #f8fafc; border: 0.5px solid #e2e8f0;
+            border-radius: 7px; padding: 7px 9px;
+        }
+        .interp-ttl {
+            font-size: 8px; font-weight: 700;
+            text-transform: uppercase; letter-spacing: 1px;
+            color: #94a3b8; margin-bottom: 3px;
+        }
+        .interp-txt { font-size: 10.5px; color: #334155; line-height: 1.55; }
+
+        /* ── Empty placeholder ── */
+        .empty-ph {
+            text-align: center; padding: 40px 10px; color: #94a3b8;
+        }
+        .empty-icon { font-size: 26px; opacity: .28; }
+        .empty-txt  { font-size: 10.5px; line-height: 1.5; margin-top: 6px; }
+
+        /* ── Grad-CAM sub-label ── */
+        .cam-sub {
+            font-size: 8px; font-weight: 700;
+            text-transform: uppercase; letter-spacing: 1px;
+            color: #94a3b8; text-align: center; margin-bottom: 3px;
+        }
+        /* Grad-CAM gambar dengan background hitam */
+        .cam-frame {
+            background: #0d1117;
+            border-radius: 7px; overflow: hidden;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .cam-frame [data-testid="stImage"] { margin: 0 !important; }
+
+        /* ── Legenda Grad-CAM ── */
+        .legend-row {
+            display: flex; gap: 12px; align-items: center;
+            padding: 5px 0; border-top: 0.5px solid #eef2f7;
+            margin-top: 4px;
+        }
+        .legend-item { font-size: 9.5px; color: #64748b; display: flex; align-items: center; gap: 4px; }
+        .ldot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+
+        /* ── Hilangkan gap antar elemen Streamlit ── */
+        [data-testid="stVerticalBlock"] > [data-testid="element-container"] {
+            margin-bottom: 0 !important;
+        }
+        div[data-testid="stMarkdownContainer"] > div { margin: 0 !important; }
+
+        /* ── Padding kolom ── */
+        [data-testid="stHorizontalBlock"] {
+            padding: 8px !important;
+            gap: 8px !important;
+            background: #eef2f7;
+        }
+        [data-testid="stHorizontalBlock"] > div {
+            background: white;
+            border-radius: 10px;
+            border: 0.5px solid #dde3ed;
+            padding: 0 !important;
+            overflow: hidden;
+        }
+    </style>
     """, unsafe_allow_html=True)
 
     # ── Header ────────────────────────────────────────────────
     st.markdown("""
-        <div class="app-header">
-            <span style="font-size:1.9rem;">🩻</span>
-            <div>
-                <h1>Klasifikasi Skoliosis — Citra X-Ray Tulang Belakang</h1>
-                <p>Transfer Learning · DenseNet121 · Grad-CAM Visualization · Binary Classification</p>
-            </div>
-        </div>
+    <div class="app-header">
+      <div class="hd-icon">🩻</div>
+      <div>
+        <p class="hd-title">Klasifikasi Skoliosis — Citra X-Ray Tulang Belakang</p>
+        <p class="hd-sub">Transfer Learning · DenseNet121 · Grad-CAM Visualization · Binary Classification</p>
+      </div>
+      <div class="hd-badge">DenseNet121 · TF-CPU</div>
+    </div>
     """, unsafe_allow_html=True)
 
-    # ── Layout: kolom 1.1 : 1.2 : 1.7 ────────────────────────
-    col_upload, col_result, col_gradcam = st.columns([1.1, 1.2, 1.7], gap="medium")
+    col1, col2, col3 = st.columns([1.1, 1.2, 1.7], gap="small")
 
     # ════════════════════════════════════════════════════════════
     # KOLOM 1 — Upload & Preview
     # ════════════════════════════════════════════════════════════
-    with col_upload:
-        st.markdown('<div class="sec-title">📁 Citra X-Ray</div>', unsafe_allow_html=True)
+    with col1:
+        st.markdown("""
+        <div class="panel-hd">
+          <div class="panel-hd-icon" style="background:#eff6ff;">🩻</div>
+          <span class="panel-hd-label">Citra X-Ray</span>
+        </div>
+        """, unsafe_allow_html=True)
 
         uploaded_file = st.file_uploader(
-            "upload", type=["jpg","jpeg","png"], label_visibility="collapsed"
+            "upload", type=["jpg", "jpeg", "png"],
+            label_visibility="collapsed",
         )
 
         if uploaded_file:
             pil_image = Image.open(uploaded_file)
 
-            # Gambar preview dengan max-height via wrapper class
-            st.markdown('<div class="xray-wrap">', unsafe_allow_html=True)
-            st.image(pil_image, use_column_width=True)
+            # ── KUNCI: resize di Python sebelum render ──
+            # Gambar portrait panjang dipotong proporsional ke tinggi XRAY_PREVIEW_H
+            # sehingga tidak pernah overflow apapun level zoom
+            preview_img = resize_to_height(pil_image.convert("RGB"), XRAY_PREVIEW_H)
+
+            st.markdown('<div class="xray-frame">', unsafe_allow_html=True)
+            st.image(preview_img, use_column_width=True)
             st.markdown('</div>', unsafe_allow_html=True)
 
-            # Chip metadata + tombol klasifikasi sejajar
-            c1, c2 = st.columns([3, 2])
-            with c1:
-                st.markdown(f"""
-                    <div style="margin-top:5px;">
-                        <span class="chip">📐 {pil_image.width}×{pil_image.height}</span>
-                        <span class="chip">🎨 {pil_image.mode}</span>
-                    </div>
-                """, unsafe_allow_html=True)
-            with c2:
-                run = st.button("🔍 Klasifikasi")
-        else:
-            pil_image = None
-            run = False
-            st.markdown("""
-                <div style="border:2px dashed #90caf9; border-radius:10px;
-                            padding:52px 10px; text-align:center; background:#f0f7ff;">
-                    <div style="font-size:2.2rem;">🩻</div>
-                    <p style="margin:6px 0 0; font-size:0.8rem; color:#64748b; font-weight:600;">
-                        Upload X-Ray Tulang Belakang
-                    </p>
-                    <p style="margin:2px 0 0; font-size:0.7rem; color:#94a3b8;">JPG / PNG</p>
-                </div>
+            st.markdown(f"""
+            <div style="margin:4px 0 2px;">
+              <span class="chip">📐 {pil_image.width}×{pil_image.height}</span>
+              <span class="chip">🎨 {pil_image.mode}</span>
+            </div>
             """, unsafe_allow_html=True)
 
-        # Info model dalam expander agar tidak makan ruang
-        with st.expander("⚙️ Info Model"):
+            run = st.button("🔍 Klasifikasi", key="btn_classify")
+        else:
+            pil_image = None
+            run       = False
             st.markdown("""
-                <div style="font-size:0.74rem; color:#475569; line-height:1.8;">
-                    🏗 <strong>DenseNet121</strong> (Keras + TF-CPU)<br>
-                    📄 best_densenet121_e4.keras<br>
-                    📐 Input: 224×224 px<br>
-                    🎯 Threshold: 0.50
-                </div>
-                <div style="margin-top:8px;">
-                    <div style="background:#e8f5e9;border-left:3px solid #2e7d32;border-radius:4px;
-                                padding:4px 8px;font-size:0.7rem;margin-bottom:4px;">
-                        🟢 <strong>Normal</strong> — Tidak ada kelengkungan lateral
-                    </div>
-                    <div style="background:#fce4e4;border-left:3px solid #c62828;border-radius:4px;
-                                padding:4px 8px;font-size:0.7rem;">
-                        🔴 <strong>Scoliosis</strong> — Terdeteksi kelengkungan lateral
-                    </div>
-                </div>
+            <div style="margin:8px; border:1.5px dashed #90caf9; border-radius:8px;
+                        padding:24px 10px; text-align:center; background:#f0f7ff;">
+              <div style="font-size:22px;opacity:.45;">🩻</div>
+              <p style="margin:5px 0 0;font-size:10.5px;color:#64748b;font-weight:600;">
+                Upload X-Ray Tulang Belakang
+              </p>
+              <p style="margin:2px 0 0;font-size:9.5px;color:#94a3b8;">JPG / PNG</p>
+            </div>
             """, unsafe_allow_html=True)
+
+        st.markdown("""
+        <div class="model-info">
+          <div class="model-info-ttl">⚙️ Info Model</div>
+          <div class="model-info-row">🏗 <b>DenseNet121</b> (Keras + TF-CPU)</div>
+          <div class="model-info-row">📄 best_densenet121_e4.keras</div>
+          <div class="model-info-row">📐 224×224 px &nbsp;·&nbsp; 🎯 Thr: 0.50</div>
+          <div class="model-lbl-row">
+            <span class="model-lbl" style="background:#e8f5e9;color:#2e7d32;">🟢 Normal</span>
+            <span class="model-lbl" style="background:#fce4e4;color:#c62828;">🔴 Scoliosis</span>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
 
     # ════════════════════════════════════════════════════════════
     # KOLOM 2 — Hasil Prediksi
     # ════════════════════════════════════════════════════════════
-    with col_result:
-        st.markdown('<div class="sec-title">📊 Hasil Prediksi</div>', unsafe_allow_html=True)
+    with col2:
+        st.markdown("""
+        <div class="panel-hd">
+          <div class="panel-hd-icon" style="background:#fce4e4;">📊</div>
+          <span class="panel-hd-label">Hasil Prediksi</span>
+        </div>
+        """, unsafe_allow_html=True)
 
-        # Jalankan klasifikasi
         if uploaded_file and run:
             with st.spinner("Memuat model…"):
                 model = load_model()
@@ -394,93 +479,76 @@ def main():
             bg     = "#fce4e4" if is_sc else "#e8f5e9"
             border = "#ef9a9a" if is_sc else "#a5d6a7"
             icon   = "🔴" if is_sc else "🟢"
-
-            # ── Diagnosis badge utama ──
-            st.markdown(f"""
-                <div style="background:{bg}; border:1.5px solid {border};
-                            border-radius:12px; padding:14px 16px;
-                            box-shadow:0 2px 8px rgba(0,0,0,0.05);">
-                    <p style="margin:0;font-size:0.6rem;font-weight:700;text-transform:uppercase;
-                               letter-spacing:1px;color:#94a3b8;">Diagnosis</p>
-                    <div style="display:flex;align-items:center;justify-content:space-between;margin:5px 0 8px;">
-                        <span style="font-size:1.55rem;font-weight:700;color:{color};">{icon} {label}</span>
-                        <span style="background:{color};color:white;padding:5px 16px;
-                                      border-radius:20px;font-size:1rem;font-weight:700;">
-                            {confidence:.1f}%
-                        </span>
-                    </div>
-                    <p style="margin:0 0 4px;font-size:0.7rem;color:#64748b;font-weight:600;">
-                        Tingkat Kepercayaan
-                    </p>
-                    <div style="background:rgba(0,0,0,0.08);border-radius:6px;height:8px;">
-                        <div style="background:{color};width:{confidence:.1f}%;
-                                    height:8px;border-radius:6px;
-                                    transition:width .5s ease;"></div>
-                    </div>
-                </div>
-            """, unsafe_allow_html=True)
-
-            # ── 3 metric cards ──
-            st.markdown(f"""
-                <div class="metric-row">
-                    <div class="metric-card">
-                        <div class="mc-label">Prob. Scoliosis</div>
-                        <div class="mc-value" style="color:#c62828;">{prob:.4f}</div>
-                        <div class="mc-sub">raw score</div>
-                    </div>
-                    <div class="metric-card">
-                        <div class="mc-label">Prob. Normal</div>
-                        <div class="mc-value" style="color:#2e7d32;">{1-prob:.4f}</div>
-                        <div class="mc-sub">raw score</div>
-                    </div>
-                    <div class="metric-card">
-                        <div class="mc-label">Threshold</div>
-                        <div class="mc-value" style="color:#1565c0;">{THRESHOLD}</div>
-                        <div class="mc-sub">cut-off</div>
-                    </div>
-                </div>
-            """, unsafe_allow_html=True)
-
-            # ── Interpretasi teks ──
             interp = (
                 "Model mendeteksi pola kelengkungan lateral pada citra. "
                 "Disarankan konfirmasi dengan evaluasi klinis lebih lanjut."
                 if is_sc else
-                "Tidak ditemukan indikasi kelengkungan lateral yang signifikan "
-                "pada citra X-Ray ini."
+                "Tidak ditemukan indikasi kelengkungan lateral yang signifikan pada citra ini."
             )
+
             st.markdown(f"""
-                <div style="margin-top:10px;background:#f8fafc;border-radius:10px;
-                            padding:10px 12px;border:1px solid #e2e8f0;">
-                    <p style="margin:0;font-size:0.62rem;font-weight:700;text-transform:uppercase;
-                               letter-spacing:.9px;color:#94a3b8;margin-bottom:4px;">Interpretasi</p>
-                    <p style="margin:0;font-size:0.76rem;color:#334155;line-height:1.55;">{interp}</p>
-                </div>
+            <div class="dx-card" style="background:{bg}; border:1px solid {border};">
+              <div class="dx-lbl">Diagnosis</div>
+              <div class="dx-row">
+                <span class="dx-name" style="color:{color};">{icon} {label}</span>
+                <span class="dx-pct" style="background:{color};">{confidence:.1f}%</span>
+              </div>
+              <div class="conf-lbl">Tingkat Kepercayaan</div>
+              <div class="conf-track">
+                <div class="conf-fill" style="width:{confidence:.1f}%; background:{color};"></div>
+              </div>
+            </div>
+            <div class="metric-row">
+              <div class="metric-card">
+                <div class="mc-l">Prob. Scoliosis</div>
+                <div class="mc-v" style="color:#c62828;">{prob:.4f}</div>
+                <div class="mc-s">raw score</div>
+              </div>
+              <div class="metric-card">
+                <div class="mc-l">Prob. Normal</div>
+                <div class="mc-v" style="color:#2e7d32;">{1-prob:.4f}</div>
+                <div class="mc-s">raw score</div>
+              </div>
+              <div class="metric-card">
+                <div class="mc-l">Threshold</div>
+                <div class="mc-v" style="color:#1565c0;">{THRESHOLD}</div>
+                <div class="mc-s">cut-off</div>
+              </div>
+            </div>
+            <div class="interp-box">
+              <div class="interp-ttl">Interpretasi</div>
+              <div class="interp-txt">{interp}</div>
+            </div>
             """, unsafe_allow_html=True)
-
         else:
-            # State kosong — placeholder proporsional
             st.markdown("""
-                <div style="border:1px solid #e2e8f0;border-radius:12px;
-                            padding:80px 10px;text-align:center;background:#fafafa;">
-                    <div style="font-size:2.4rem;opacity:.25;">📊</div>
-                    <p style="margin:8px 0 0;font-size:0.8rem;color:#94a3b8;">
-                        Upload gambar lalu tekan <strong>Klasifikasi</strong>
-                    </p>
-                </div>
+            <div class="empty-ph">
+              <div class="empty-icon">📊</div>
+              <div class="empty-txt">Upload gambar lalu tekan<br><b>Klasifikasi</b></div>
+            </div>
             """, unsafe_allow_html=True)
 
     # ════════════════════════════════════════════════════════════
-    # KOLOM 3 — Grad-CAM (lebar 1.7)
+    # KOLOM 3 — Grad-CAM
     # ════════════════════════════════════════════════════════════
-    with col_gradcam:
-        st.markdown('<div class="sec-title">🔥 Grad-CAM Visualization</div>', unsafe_allow_html=True)
+    with col3:
+        st.markdown("""
+        <div class="panel-hd">
+          <div class="panel-hd-icon" style="background:#fff8e1;">🔥</div>
+          <span class="panel-hd-label">Grad-CAM Visualization</span>
+        </div>
+        """, unsafe_allow_html=True)
 
         if st.session_state.get("ran") and uploaded_file:
-
             if not st.session_state.get("gradcam_done"):
-                # Tombol generate — tampil ketika belum ada hasil
-                if st.button("🔥 Generate Grad-CAM"):
+                st.markdown("""
+                <div class="empty-ph">
+                  <div class="empty-icon">🔥</div>
+                  <div class="empty-txt">Tekan tombol untuk melihat<br>area fokus model pada citra</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                if st.button("🔥 Generate Grad-CAM", key="btn_gradcam"):
                     with st.spinner("Menghasilkan peta aktivasi…"):
                         heatmap = make_gradcam_heatmap(
                             st.session_state["img_tensor"],
@@ -488,78 +556,61 @@ def main():
                             st.session_state["prob"],
                         )
                     if heatmap is not None:
-                        overlay = make_overlay(st.session_state["pil_image"], heatmap)
-                        st.session_state["heatmap_bytes"] = heatmap_to_png_bytes(heatmap)
-                        st.session_state["overlay_bytes"] = img_to_bytes(overlay)
+                        src_img = st.session_state["pil_image"]
+                        overlay = make_overlay(src_img, heatmap)
+
+                        # ── Resize Grad-CAM output di Python ──
+                        heatmap_bytes = heatmap_to_png_bytes(heatmap)
+                        # Buka bytes sebagai PIL, resize, simpan lagi
+                        hm_pil = Image.open(io.BytesIO(heatmap_bytes))
+                        hm_pil = resize_to_height(hm_pil.convert("RGB"), GRADCAM_H)
+                        ov_pil = resize_to_height(overlay.convert("RGB"), GRADCAM_H)
+
+                        buf_hm = io.BytesIO(); hm_pil.save(buf_hm, "PNG")
+                        buf_ov = io.BytesIO(); ov_pil.save(buf_ov, "PNG")
+
+                        st.session_state["heatmap_bytes"] = buf_hm.getvalue()
+                        st.session_state["overlay_bytes"] = buf_ov.getvalue()
                         st.session_state["gradcam_done"]  = True
                         st.rerun()
-
-                # Placeholder sebelum di-generate
-                st.markdown("""
-                    <div style="border:1px solid #e2e8f0;border-radius:12px;
-                                padding:80px 10px;text-align:center;background:#fafafa;">
-                        <div style="font-size:2.4rem;opacity:.25;">🔥</div>
-                        <p style="margin:8px 0 0;font-size:0.8rem;color:#94a3b8;">
-                            Tekan <strong>Generate Grad-CAM</strong> untuk melihat<br>area fokus model
-                        </p>
-                    </div>
-                """, unsafe_allow_html=True)
-
             else:
-                # ── Grad-CAM sudah ada — tampilkan 2 gambar side by side ──
                 gc1, gc2 = st.columns(2, gap="small")
 
                 with gc1:
-                    st.markdown("""
-                        <p style="font-size:0.62rem;font-weight:700;text-transform:uppercase;
-                                   letter-spacing:1px;color:#94a3b8;text-align:center;margin-bottom:4px;">
-                            🌡 Heatmap
-                        </p>
-                    """, unsafe_allow_html=True)
-                    st.markdown('<div class="gradcam-img">', unsafe_allow_html=True)
+                    st.markdown('<div class="cam-sub">🌡 Heatmap</div>', unsafe_allow_html=True)
+                    st.markdown('<div class="cam-frame">', unsafe_allow_html=True)
                     st.image(st.session_state["heatmap_bytes"], use_column_width=True)
                     st.markdown('</div>', unsafe_allow_html=True)
 
                 with gc2:
-                    st.markdown("""
-                        <p style="font-size:0.62rem;font-weight:700;text-transform:uppercase;
-                                   letter-spacing:1px;color:#94a3b8;text-align:center;margin-bottom:4px;">
-                            🖼 Overlay
-                        </p>
-                    """, unsafe_allow_html=True)
-                    st.markdown('<div class="gradcam-img">', unsafe_allow_html=True)
+                    st.markdown('<div class="cam-sub">🖼 Overlay</div>', unsafe_allow_html=True)
+                    st.markdown('<div class="cam-frame">', unsafe_allow_html=True)
                     st.image(st.session_state["overlay_bytes"], use_column_width=True)
                     st.markdown('</div>', unsafe_allow_html=True)
 
-                # Legenda + tombol reset
                 st.markdown("""
-                    <div class="legend-row">
-                        <span><span class="legend-dot" style="background:#e53e3e;"></span>Merah/Kuning = Aktivasi tinggi</span>
-                        <span><span class="legend-dot" style="background:#3182ce;"></span>Biru = Aktivasi rendah</span>
-                    </div>
+                <div class="legend-row">
+                  <span class="legend-item">
+                    <span class="ldot" style="background:#e53e3e;"></span>
+                    Merah/Kuning = Aktivasi tinggi
+                  </span>
+                  <span class="legend-item">
+                    <span class="ldot" style="background:#3182ce;"></span>
+                    Biru = Aktivasi rendah
+                  </span>
+                </div>
                 """, unsafe_allow_html=True)
 
-                # Tombol reset kecil di bawah legenda
-                if st.button("↺ Reset Grad-CAM"):
+                if st.button("↺ Reset Grad-CAM", key="btn_reset"):
                     st.session_state["gradcam_done"] = False
                     st.rerun()
-
         else:
             st.markdown("""
-                <div style="border:1px solid #e2e8f0;border-radius:12px;
-                            padding:80px 10px;text-align:center;background:#fafafa;">
-                    <div style="font-size:2.4rem;opacity:.25;">🔥</div>
-                    <p style="margin:8px 0 0;font-size:0.8rem;color:#94a3b8;">
-                        Selesaikan klasifikasi terlebih dahulu
-                    </p>
-                </div>
+            <div class="empty-ph">
+              <div class="empty-icon">🔥</div>
+              <div class="empty-txt">Selesaikan klasifikasi<br>terlebih dahulu</div>
+            </div>
             """, unsafe_allow_html=True)
-
-
-def img_to_bytes(pil_image: Image.Image) -> bytes:
-    buf = io.BytesIO()
-    pil_image.save(buf, format="PNG")
-    return buf.getvalue()
 
 
 if __name__ == "__main__":
