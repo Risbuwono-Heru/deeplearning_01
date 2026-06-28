@@ -1,114 +1,179 @@
 """
 Aplikasi Streamlit: Klasifikasi Skoliosis pada Citra X-Ray Tulang Belakang
 Menggunakan Transfer Learning dengan Arsitektur DenseNet121
-"""
 
-"""
-Aplikasi Streamlit: Klasifikasi Skoliosis pada Citra X-Ray Tulang Belakang
-Menggunakan Transfer Learning dengan Arsitektur DenseNet121
+Optimasi:
+- Backend: TensorFlow-CPU (menggantikan JAX yang berat)
+- Model hosting: Hugging Face Hub (menggantikan Google Drive)
+- Inference: TFLite untuk prediksi cepat (~3x lebih ringan)
+- Grad-CAM: lazy load, hanya dimuat saat diminta user
+- Full model (.keras) dimuat terpisah hanya untuk Grad-CAM
 """
 
 import os
-import gdown
 import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
 from PIL import Image
-
-os.environ["KERAS_BACKEND"] = "jax"
-import keras
-
 
 # ─────────────────────────────────────────────────────────────
 # KONFIGURASI
 # ─────────────────────────────────────────────────────────────
-IMG_SIZE          = (224, 224)
-THRESHOLD         = 0.50
-POSITIVE_CLASS    = "Scoliosis"
-NEGATIVE_CLASS    = "Normal"
-GDRIVE_ID         = "1eSAJ8lDoXsm5E3K7BZlFDJq7-NloTIH6"
-LOCAL_MODEL_PATH  = "models/best_densenet121_e4.keras"
-CACHED_MODEL_PATH = "/tmp/best_densenet121_e4.keras"
-LAST_CONV_LAYER   = "conv5_block16_concat"
+IMG_SIZE           = (224, 224)
+THRESHOLD          = 0.50
+POSITIVE_CLASS     = "Scoliosis"
+NEGATIVE_CLASS     = "Normal"
+LAST_CONV_LAYER    = "conv5_block16_concat"
+
+# Hugging Face Hub — ganti dengan repo kamu setelah upload model
+HF_REPO_ID         = "username/scoliosis-densenet121"   # ← GANTI INI
+HF_TFLITE_FILE     = "best_densenet121_e4.tflite"       # untuk prediksi cepat
+HF_KERAS_FILE      = "best_densenet121_e4.keras"        # untuk Grad-CAM
+
+# Path lokal (dev) — jika ada, dipakai duluan
+LOCAL_TFLITE_PATH  = "models/best_densenet121_e4.tflite"
+LOCAL_KERAS_PATH   = "models/best_densenet121_e4.keras"
+
+# Cache path di Streamlit Cloud (/tmp persisten selama container hidup)
+CACHE_TFLITE_PATH  = "/tmp/best_densenet121_e4.tflite"
+CACHE_KERAS_PATH   = "/tmp/best_densenet121_e4.keras"
 
 # ─────────────────────────────────────────────────────────────
-# DOWNLOAD MODEL
+# DOWNLOAD HELPER — HF Hub
 # ─────────────────────────────────────────────────────────────
 
-def resolve_model_path():
-    if os.path.exists(LOCAL_MODEL_PATH):
-        return LOCAL_MODEL_PATH
-    if os.path.exists(CACHED_MODEL_PATH) and os.path.getsize(CACHED_MODEL_PATH) > 10_000:
-        return CACHED_MODEL_PATH
-    if os.path.exists(CACHED_MODEL_PATH):
-        os.remove(CACHED_MODEL_PATH)
-    with st.spinner("⏬ Mengunduh model dari Google Drive..."):
-        try:
-            gdown.download(f"https://drive.google.com/uc?id={GDRIVE_ID}", CACHED_MODEL_PATH, quiet=False)
-        except Exception as e:
-            st.error(f"Gagal mengunduh model: {e}")
-            return None
-    if os.path.exists(CACHED_MODEL_PATH) and os.path.getsize(CACHED_MODEL_PATH) > 10_000:
-        return CACHED_MODEL_PATH
-    st.error("❌ File model tidak valid.")
-    return None
+def _download_from_hf(filename: str, cache_path: str) -> str | None:
+    """Download file dari Hugging Face Hub ke cache_path. Return path atau None."""
+    if os.path.exists(cache_path) and os.path.getsize(cache_path) > 10_000:
+        return cache_path
+    try:
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(
+            repo_id=HF_REPO_ID,
+            filename=filename,
+            local_dir="/tmp/hf_cache",
+            local_dir_use_symlinks=False,
+        )
+        return path
+    except Exception as e:
+        st.error(f"❌ Gagal mengunduh `{filename}` dari Hugging Face Hub: {e}")
+        return None
+
+# ─────────────────────────────────────────────────────────────
+# LOAD MODEL TFLITE — untuk prediksi cepat
+# ─────────────────────────────────────────────────────────────
 
 @st.cache_resource(show_spinner=False)
-def load_model():
-    model_path = resolve_model_path()
+def load_tflite_interpreter():
+    """Load TFLite interpreter. Di-cache agar tidak reload tiap interaksi."""
+    # Coba path lokal dulu (development)
+    if os.path.exists(LOCAL_TFLITE_PATH):
+        model_path = LOCAL_TFLITE_PATH
+    else:
+        with st.spinner("⏬ Mengunduh model (TFLite) dari Hugging Face Hub…"):
+            model_path = _download_from_hf(HF_TFLITE_FILE, CACHE_TFLITE_PATH)
+
     if model_path is None:
         return None
+
     try:
-        return keras.models.load_model(model_path)
+        import tensorflow as tf
+        interpreter = tf.lite.Interpreter(model_path=str(model_path))
+        interpreter.allocate_tensors()
+        return interpreter
     except Exception as e:
-        st.error(f"Gagal memuat model: {e}")
-        if os.path.exists(CACHED_MODEL_PATH):
-            os.remove(CACHED_MODEL_PATH)
+        st.error(f"❌ Gagal memuat model TFLite: {e}")
         return None
 
 # ─────────────────────────────────────────────────────────────
-# PRA-PROSES & PREDIKSI
+# LOAD FULL MODEL KERAS — hanya untuk Grad-CAM (lazy)
 # ─────────────────────────────────────────────────────────────
 
-def preprocess_image(pil_image):
+@st.cache_resource(show_spinner=False)
+def load_keras_model():
+    """Load model Keras penuh. Hanya dipanggil saat user minta Grad-CAM."""
+    if os.path.exists(LOCAL_KERAS_PATH):
+        model_path = LOCAL_KERAS_PATH
+    else:
+        with st.spinner("⏬ Mengunduh full model untuk Grad-CAM…"):
+            model_path = _download_from_hf(HF_KERAS_FILE, CACHE_KERAS_PATH)
+
+    if model_path is None:
+        return None
+
+    try:
+        os.environ["KERAS_BACKEND"] = "tensorflow"
+        import keras
+        return keras.models.load_model(str(model_path))
+    except Exception as e:
+        st.error(f"❌ Gagal memuat model Keras: {e}")
+        return None
+
+# ─────────────────────────────────────────────────────────────
+# PRA-PROSES GAMBAR
+# ─────────────────────────────────────────────────────────────
+
+def preprocess_image(pil_image: Image.Image) -> np.ndarray:
     img = pil_image.convert("RGB").resize(IMG_SIZE)
     return np.expand_dims(np.array(img, dtype=np.float32) / 255.0, axis=0)
 
-def predict(model, img_tensor):
-    prob = float(model.predict(img_tensor, verbose=0)[0][0])
+# ─────────────────────────────────────────────────────────────
+# PREDIKSI — TFLite interpreter
+# ─────────────────────────────────────────────────────────────
+
+def predict(interpreter, img_tensor: np.ndarray) -> tuple[str, float, float]:
+    inp_detail = interpreter.get_input_details()[0]
+    out_detail = interpreter.get_output_details()[0]
+
+    # Sesuaikan dtype dengan kebutuhan model
+    dtype = inp_detail["dtype"]
+    interpreter.set_tensor(inp_detail["index"], img_tensor.astype(dtype))
+    interpreter.invoke()
+
+    prob = float(interpreter.get_tensor(out_detail["index"])[0][0])
     if prob >= THRESHOLD:
         return POSITIVE_CLASS, prob * 100, prob
     return NEGATIVE_CLASS, (1 - prob) * 100, prob
 
 # ─────────────────────────────────────────────────────────────
-# GRAD-CAM
+# GRAD-CAM — TensorFlow GradientTape (tidak butuh JAX)
 # ─────────────────────────────────────────────────────────────
 
-def make_gradcam_heatmap(img_tensor, model, prob):
+def make_gradcam_heatmap(img_tensor: np.ndarray, keras_model, prob: float) -> np.ndarray | None:
     try:
-        import jax, jax.numpy as jnp
+        import tensorflow as tf
+        import keras
+
         grad_model = keras.Model(
-            inputs=model.inputs,
-            outputs=[model.get_layer(LAST_CONV_LAYER).output, model.output],
+            inputs=keras_model.inputs,
+            outputs=[
+                keras_model.get_layer(LAST_CONV_LAYER).output,
+                keras_model.output,
+            ],
         )
-        img_jax = jnp.array(img_tensor)
-        def forward(x):
-            conv_out, pred = grad_model(x, training=False)
-            p = pred[:, 0]
-            return (p if prob >= THRESHOLD else (1 - p)).sum(), conv_out
-        (_, conv_output), grads = jax.value_and_grad(forward, has_aux=True)(img_jax)
-        pooled_grads = jnp.mean(grads[1], axis=(0, 1, 2))
-        heatmap = jnp.sum(conv_output[0] * pooled_grads, axis=-1)
-        heatmap = np.array(jnp.maximum(heatmap, 0))
+        img_tf = tf.cast(img_tensor, tf.float32)
+
+        with tf.GradientTape() as tape:
+            tape.watch(img_tf)
+            conv_output, predictions = grad_model(img_tf, training=False)
+            p = predictions[:, 0]
+            score = p if prob >= THRESHOLD else (1.0 - p)
+
+        grads = tape.gradient(score, conv_output)
+        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+        heatmap = tf.reduce_sum(conv_output[0] * pooled_grads, axis=-1)
+        heatmap = tf.maximum(heatmap, 0).numpy()
+
         if heatmap.max() > 0:
             heatmap /= heatmap.max()
         return heatmap
+
     except Exception as e:
-        st.warning(f"Grad-CAM tidak tersedia: {e}")
+        st.warning(f"⚠️ Grad-CAM tidak tersedia: {e}")
         return None
 
-def overlay_gradcam(pil_image, heatmap, alpha=0.45):
+
+def overlay_gradcam(pil_image: Image.Image, heatmap: np.ndarray, alpha: float = 0.45) -> Image.Image:
     colors      = plt.colormaps["jet"](np.arange(256))[:, :3]
     jet_heatmap = Image.fromarray(np.uint8(colors[np.uint8(255 * heatmap)] * 255))
     jet_heatmap = jet_heatmap.resize(pil_image.size, Image.BILINEAR)
@@ -123,7 +188,7 @@ def main():
         page_title="Scoliosis X-Ray Classifier",
         page_icon="🩻",
         layout="wide",
-        initial_sidebar_state="collapsed",  # sidebar disembunyikan default
+        initial_sidebar_state="collapsed",
     )
 
     st.markdown("""
@@ -131,7 +196,6 @@ def main():
             @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
             html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 
-            /* Hilangkan semua padding default */
             .block-container {
                 padding: 0 1.5rem 0.5rem 1.5rem !important;
                 max-width: 100% !important;
@@ -139,7 +203,6 @@ def main():
             [data-testid="stAppViewContainer"] { background: #f0f4f8; }
             [data-testid="stHeader"] { display: none; }
 
-            /* Header compact */
             .app-header {
                 background: linear-gradient(135deg, #0d47a1 0%, #1976d2 100%);
                 color: white;
@@ -151,36 +214,14 @@ def main():
                 gap: 14px;
                 box-shadow: 0 3px 12px rgba(13,71,161,0.25);
             }
-            .app-header h1 {
-                margin: 0;
-                font-size: 1.05rem;
-                font-weight: 700;
-                line-height: 1.3;
-            }
-            .app-header p {
-                margin: 0;
-                font-size: 0.72rem;
-                opacity: 0.8;
-            }
+            .app-header h1 { margin: 0; font-size: 1.05rem; font-weight: 700; line-height: 1.3; }
+            .app-header p  { margin: 0; font-size: 0.72rem; opacity: 0.8; }
 
-            /* Panel cards */
-            .panel {
-                background: white;
-                border-radius: 12px;
-                padding: 14px 16px;
-                box-shadow: 0 1px 6px rgba(0,0,0,0.07);
-                height: 100%;
-            }
-            .panel-title {
-                font-size: 0.65rem;
-                font-weight: 700;
-                text-transform: uppercase;
-                letter-spacing: 1.2px;
-                color: #64748b;
-                margin-bottom: 8px;
-            }
+            .panel { background: white; border-radius: 12px; padding: 14px 16px;
+                     box-shadow: 0 1px 6px rgba(0,0,0,0.07); height: 100%; }
+            .panel-title { font-size: 0.65rem; font-weight: 700; text-transform: uppercase;
+                           letter-spacing: 1.2px; color: #64748b; margin-bottom: 8px; }
 
-            /* Upload area */
             [data-testid="stFileUploader"] > div {
                 border: 2px dashed #90caf9 !important;
                 border-radius: 10px !important;
@@ -188,46 +229,24 @@ def main():
                 padding: 6px !important;
             }
 
-            /* Classify button */
             .stButton > button {
                 width: 100%;
                 background: linear-gradient(135deg, #1565c0, #1976d2);
-                color: white;
-                border: none;
-                border-radius: 8px;
-                padding: 9px 0;
-                font-size: 0.9rem;
-                font-weight: 600;
-                margin-top: 6px;
-                box-shadow: 0 2px 8px rgba(21,101,192,0.3);
+                color: white; border: none; border-radius: 8px;
+                padding: 9px 0; font-size: 0.9rem; font-weight: 600;
+                margin-top: 6px; box-shadow: 0 2px 8px rgba(21,101,192,0.3);
             }
             .stButton > button:hover {
                 background: linear-gradient(135deg, #0d47a1, #1565c0);
                 transform: translateY(-1px);
             }
 
-            /* Result card */
-            .result-card {
-                border-radius: 10px;
-                padding: 12px 16px;
-                margin-bottom: 10px;
-            }
-            .result-scoliosis { background:#fce4e4; border-left:4px solid #c62828; }
-            .result-normal    { background:#e8f5e9; border-left:4px solid #2e7d32; }
-
-            /* Metric chip */
             .chip {
-                display: inline-block;
-                background: #e8f0fe;
-                color: #1a56db;
-                padding: 2px 8px;
-                border-radius: 12px;
-                font-size: 0.7rem;
-                font-weight: 600;
-                margin: 1px;
+                display: inline-block; background: #e8f0fe; color: #1a56db;
+                padding: 2px 8px; border-radius: 12px;
+                font-size: 0.7rem; font-weight: 600; margin: 1px;
             }
 
-            /* Sembunyikan footer & menu */
             footer { display: none !important; }
             #MainMenu { display: none !important; }
             [data-testid="collapsedControl"] { display: none !important; }
@@ -245,7 +264,7 @@ def main():
         </div>
     """, unsafe_allow_html=True)
 
-    # ── Layout 3 kolom: Upload | Hasil | Grad-CAM ─────────────
+    # ── Layout 3 kolom ────────────────────────────────────────
     col_upload, col_result, col_gradcam = st.columns([1, 1, 1], gap="medium")
 
     # ── Kolom 1: Upload ───────────────────────────────────────
@@ -253,7 +272,7 @@ def main():
         st.markdown('<p class="panel-title">📁 Upload Citra X-Ray</p>', unsafe_allow_html=True)
 
         uploaded_file = st.file_uploader(
-            "Upload", type=["jpg","jpeg","png"], label_visibility="collapsed"
+            "Upload", type=["jpg", "jpeg", "png"], label_visibility="collapsed"
         )
 
         if uploaded_file:
@@ -279,13 +298,12 @@ def main():
             """, unsafe_allow_html=True)
             run = False
 
-        # Info model di bawah upload
         st.markdown("""
             <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px;
                         padding:10px 12px; margin-top:10px; font-size:0.75rem; color:#475569;">
                 <p style="margin:0; font-weight:700; color:#1e293b; margin-bottom:4px;">⚙️ Info Model</p>
-                <p style="margin:0;">🏗 DenseNet121</p>
-                <p style="margin:0;">📄 best_densenet121_e4.keras</p>
+                <p style="margin:0;">🏗 DenseNet121 (TFLite)</p>
+                <p style="margin:0;">📄 best_densenet121_e4.tflite</p>
                 <p style="margin:0;">📐 224×224 px &nbsp;|&nbsp; 🎯 Threshold: 0.50</p>
             </div>
         """, unsafe_allow_html=True)
@@ -308,21 +326,21 @@ def main():
         st.markdown('<p class="panel-title">📊 Hasil Prediksi</p>', unsafe_allow_html=True)
 
         if uploaded_file and run:
-            with st.spinner("Memuat model..."):
-                model = load_model()
+            with st.spinner("Memuat model…"):
+                interpreter = load_tflite_interpreter()
 
-            if model is None:
+            if interpreter is None:
                 st.error("❌ Model gagal dimuat.")
             else:
-                with st.spinner("Menganalisis..."):
+                with st.spinner("Menganalisis gambar…"):
                     img_tensor              = preprocess_image(pil_image)
-                    label, confidence, prob = predict(model, img_tensor)
+                    label, confidence, prob = predict(interpreter, img_tensor)
 
-                is_sc    = label == POSITIVE_CLASS
-                color    = "#c62828" if is_sc else "#2e7d32"
-                bg       = "#fce4e4" if is_sc else "#e8f5e9"
-                border   = "#ef9a9a" if is_sc else "#a5d6a7"
-                icon     = "🔴" if is_sc else "🟢"
+                is_sc  = label == POSITIVE_CLASS
+                color  = "#c62828" if is_sc else "#2e7d32"
+                bg     = "#fce4e4" if is_sc else "#e8f5e9"
+                border = "#ef9a9a" if is_sc else "#a5d6a7"
+                icon   = "🔴" if is_sc else "🟢"
 
                 st.markdown(f"""
                     <div style="background:{bg}; border:1.5px solid {border};
@@ -341,20 +359,20 @@ def main():
                             Tingkat Kepercayaan
                         </p>
                         <div style="background:rgba(0,0,0,0.08); border-radius:6px; height:10px;">
-                            <div style="background:{color}; width:{confidence:.1f}%; height:10px; border-radius:6px;"></div>
+                            <div style="background:{color}; width:{confidence:.1f}%;
+                                        height:10px; border-radius:6px;"></div>
                         </div>
                         <p style="margin:10px 0 0 0; font-size:0.72rem; color:#64748b;">
                             Prob. Scoliosis: <strong>{prob:.4f}</strong><br>
-                            Prob. Normal: <strong>{1-prob:.4f}</strong><br>
+                            Prob. Normal: <strong>{1 - prob:.4f}</strong><br>
                             Threshold: <strong>{THRESHOLD}</strong>
                         </p>
                     </div>
                 """, unsafe_allow_html=True)
 
-                # Store untuk kolom 3
+                # Simpan ke session state untuk Grad-CAM
                 st.session_state["img_tensor"] = img_tensor
                 st.session_state["prob"]       = prob
-                st.session_state["model"]      = model
                 st.session_state["pil_image"]  = pil_image
                 st.session_state["ran"]        = True
 
@@ -369,26 +387,40 @@ def main():
                 </div>
             """, unsafe_allow_html=True)
 
-    # ── Kolom 3: Grad-CAM ─────────────────────────────────────
+    # ── Kolom 3: Grad-CAM (lazy — hanya dimuat saat user klik) ──
     with col_gradcam:
         st.markdown('<p class="panel-title">🔥 Grad-CAM Visualization</p>', unsafe_allow_html=True)
 
-        if st.session_state.get("ran") and uploaded_file and run:
-            with st.spinner("Menghasilkan peta aktivasi..."):
-                heatmap = make_gradcam_heatmap(
-                    st.session_state["img_tensor"],
-                    st.session_state["model"],
-                    st.session_state["prob"],
-                )
+        if st.session_state.get("ran") and uploaded_file:
+            # Tombol terpisah — full model (.keras) hanya diunduh saat ini diklik
+            if st.button("🔥 Generate Grad-CAM"):
+                with st.spinner("Memuat full model untuk Grad-CAM…"):
+                    keras_model = load_keras_model()
 
-            if heatmap is not None:
+                if keras_model is None:
+                    st.error("❌ Full model gagal dimuat.")
+                else:
+                    with st.spinner("Menghasilkan peta aktivasi…"):
+                        heatmap = make_gradcam_heatmap(
+                            st.session_state["img_tensor"],
+                            keras_model,
+                            st.session_state["prob"],
+                        )
+
+                    if heatmap is not None:
+                        st.session_state["heatmap"]  = heatmap
+                        st.session_state["gradcam_done"] = True
+
+            # Tampilkan hasil Grad-CAM jika sudah digenerate
+            if st.session_state.get("gradcam_done"):
+                heatmap = st.session_state["heatmap"]
                 overlay = overlay_gradcam(st.session_state["pil_image"], heatmap)
 
                 tab1, tab2 = st.tabs(["🌡 Heatmap", "🖼 Overlay"])
                 with tab1:
                     fig, ax = plt.subplots(figsize=(4, 4))
-                    fig.patch.set_facecolor('#0d1117')
-                    ax.set_facecolor('#0d1117')
+                    fig.patch.set_facecolor("#0d1117")
+                    ax.set_facecolor("#0d1117")
                     im = ax.imshow(heatmap, cmap="jet")
                     ax.axis("off")
                     plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
@@ -411,7 +443,7 @@ def main():
                             text-align:center; background:#fafafa;">
                     <span style="font-size:2.5rem; opacity:0.3;">🔥</span>
                     <p style="margin:8px 0 0 0; font-size:0.82rem; color:#94a3b8;">
-                        Grad-CAM akan muncul setelah klasifikasi
+                        Klik "Klasifikasi" dulu, lalu generate Grad-CAM
                     </p>
                 </div>
             """, unsafe_allow_html=True)
